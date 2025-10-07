@@ -1,0 +1,73 @@
+// app.js (ตัวอย่างย่อ)
+const express = require('express');
+const bodyParser = require('body-parser');
+const sqlite3 = require('sqlite3').verbose();
+const db = new sqlite3.Database(':memory:'); // เปลี่ยนเป็นไฟล์จริง
+
+const app = express();
+app.use(bodyParser.json());
+
+// init tables (ตัวอย่างสั้นๆ)
+db.serialize(()=>{
+  db.run(`CREATE TABLE products(id INTEGER PRIMARY KEY, name TEXT, price INTEGER)`);
+  db.run(`CREATE TABLE codes(id INTEGER PRIMARY KEY, product_id INTEGER, code TEXT, status TEXT)`);
+  db.run(`CREATE TABLE orders(id INTEGER PRIMARY KEY, email TEXT, product_id INTEGER, amount INTEGER, status TEXT, code_id INTEGER)`);
+  db.run(`INSERT INTO products (name,price) VALUES ('เกมคีย์ A',5000)`);
+  db.run(`INSERT INTO codes (product_id,code,status) VALUES (1,'ABC-111','available'),(1,'ABC-222','available')`);
+});
+
+// ดูสินค้า
+app.get('/products', (req,res)=>{
+  db.all("SELECT * FROM products",[],(err,rows)=>res.json(rows));
+});
+
+// สร้างคำสั่งซื้อ (reserve code)
+app.post('/create-order', (req,res)=>{
+  const { email, product_id } = req.body;
+  db.get("SELECT id,code FROM codes WHERE product_id=? AND status='available' LIMIT 1",[product_id],(err,codeRow)=>{
+    if(!codeRow) return res.status(400).json({error:'สินค้าหมด'});
+    // reserve code: set status=reserved (ง่ายๆ)
+    db.run("UPDATE codes SET status='reserved' WHERE id=?", [codeRow.id], function(){
+      // create order
+      db.run("INSERT INTO orders (email,product_id,amount,status,code_id) VALUES (?,?,?,?,?)",
+        [email, product_id, 5000, 'pending', codeRow.id],
+        function(err){
+          res.json({ order_id: this.lastID, payment_url: `/pay/${this.lastID}` });
+        });
+    });
+  });
+});
+
+// Simulate payment callback (in prod: verify signature from gateway)
+app.post('/webhook/payment', (req,res)=>{
+  const { order_id } = req.body;
+  // mark order paid, deliver code
+  db.get("SELECT * FROM orders WHERE id=?", [order_id], (err,order)=>{
+    if(!order) return res.status(404).send('order not found');
+    db.run("UPDATE orders SET status='paid' WHERE id=?", [order_id], ()=>{
+      db.get("SELECT * FROM codes WHERE id=?", [order.code_id], (err,code)=>{
+        db.run("UPDATE codes SET status='sold' WHERE id=?", [code.id], ()=>{
+          // here send email to customer with code.code
+          console.log('deliver code to', order.email, 'code=', code.code);
+          res.send('ok');
+        });
+      });
+    });
+  });
+});
+
+app.listen(3000, ()=>console.log('listening 3000'));
+<!-- index.html -->
+<button id="buy">ซื้อเลย</button>
+<script>
+document.getElementById('buy').onclick = async ()=>{
+  const resp = await fetch('/create-order', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ email:'you@example.com', product_id:1 })
+  });
+  const j = await resp.json();
+  // ทำ redirect ไปชำระเงินกับ payment gateway หรือเปิดลิงก์
+  alert('สั่งซื้อแล้ว ไปหน้าชำระเงิน: ' + j.payment_url);
+}
+</script>
+
